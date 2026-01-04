@@ -10,6 +10,9 @@ import time
 import argparse
 from pathlib import Path
 from datetime import datetime
+import urllib.request
+import urllib.parse
+from urllib.error import URLError, HTTPError
 
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -75,7 +78,77 @@ def download_transcript(video_id, delay=15):
     return transcript_text
 
 
-def build_prompt(transcripts, context_message, output_size, enable_research):
+def get_formatting_guidelines(article_type):
+    """Get formatting guidelines based on article type."""
+    guidelines = {
+        "LinkedIn Article": """OUTPUT FORMATTING (STRICT LINKEDIN STYLE):
+The Hook: Start with a punchy, 1-2 sentence hook. No "In this post" or "Today we discuss." Jump straight into the tension or the value proposition.
+Structure:
+Use short paragraphs (1-2 sentences max).
+Use double line breaks for "white space" readability.
+Use bullet points for technical comparisons or feature lists.
+Tone: Professional, insightful, slightly conversational but highly technical.
+Emojis: Use them to break up text, but do not overdo it. (e.g., 🚀 🛠️ 💡).
+Engagement: End with a specific question to the audience to drive comments.
+Hashtags: 3-5 relevant tags at the very bottom.""",
+        "LinkedIn Post": """OUTPUT FORMATTING (LINKEDIN POST STYLE):
+Keep it concise and punchy (under 3000 characters).
+Start with a strong hook that grabs attention.
+Use short paragraphs and line breaks for readability.
+Include emojis sparingly for visual appeal.
+End with a call-to-action or question.
+Hashtags: 3-5 relevant tags at the bottom.""",
+        "Substack": """OUTPUT FORMATTING (SUBSTACK STYLE):
+Professional newsletter/article format.
+Longer form content with clear sections.
+Use headers and subheaders to break up content.
+Include engaging introduction and conclusion.
+More narrative and storytelling approach.
+No hashtags needed.""",
+        "Reddit Post": """OUTPUT FORMATTING (REDDIT POST STYLE):
+Conversational and engaging tone.
+Use clear formatting with headers and bullet points.
+Include TL;DR (Too Long; Didn't Read) summary at the top.
+Engage with the community style - ask questions, invite discussion.
+Use markdown formatting for readability.
+No hashtags needed.""",
+        "Blog Post": """OUTPUT FORMATTING (BLOG POST STYLE):
+Professional blog article format.
+Clear introduction, body, and conclusion.
+Use headers and subheaders for structure.
+Include engaging narrative and examples.
+SEO-friendly structure.
+No hashtags needed.""",
+        "Twitter Thread": """OUTPUT FORMATTING (TWITTER THREAD STYLE):
+Break content into tweet-sized chunks (280 characters each).
+Number each tweet (1/n, 2/n, etc.).
+Start with a hook tweet that grabs attention.
+Each tweet should be self-contained but part of a narrative.
+Use emojis and formatting for engagement.
+Include a final tweet with key takeaways.
+No hashtags needed."""
+    }
+    return guidelines.get(article_type, guidelines["LinkedIn Article"])
+
+
+def extract_links(text):
+    """Extract URLs from text."""
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+[^\s<>"{}|\\^`\[\].,;:!?]'
+    urls = re.findall(url_pattern, text)
+    return urls
+
+
+def verify_link(url):
+    """Verify that a link is accessible."""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.status == 200
+    except (URLError, HTTPError, ValueError, Exception):
+        return False
+
+
+def build_prompt(transcripts, context_message, additional_info, article_type, word_count, audience, enable_research):
     """Build the prompt for the Gemini API."""
     
     # Build transcript content
@@ -90,18 +163,39 @@ def build_prompt(transcripts, context_message, output_size, enable_research):
 CONTEXT BLOCK:
 Topic: {context_message}
 Angle: Technical deep-dive with practical insights
-Audience: Senior engineers and technical practitioners
+Audience: {audience}
+"""
+    else:
+        context_block = f"""
+CONTEXT BLOCK:
+Angle: Technical deep-dive with practical insights
+Audience: {audience}
 """
     
-    # Adjust system instruction based on output size
-    size_guidance = {
-        "SHORT": "The article should be approximately 1-2 pages long (500-1000 words).",
-        "MEDIUM": "The article should be approximately 2-4 pages long (1000-2000 words).",
-        "LONG": "The article should be approximately 4-6 pages long (2000-3000 words)."
-    }
+    # Add additional info block if provided
+    additional_block = ""
+    if additional_info and additional_info.strip():
+        # Extract links from additional_info
+        links = extract_links(additional_info)
+        links_text = ""
+        if links:
+            links_text = "\n\nIMPORTANT: The following links are provided for you to review and potentially reference:\n" + "\n".join(f"- {link}" for link in links)
+        
+        additional_block = f"""
+ADDITIONAL INFORMATION:
+{additional_info}{links_text}
+
+Please review any provided links and incorporate relevant information from them into the article.
+"""
+    
+    # Word count guidance
+    word_count_int = int(word_count)
+    size_guidance = f"The {article_type.lower()} should be approximately {word_count_int} words (target: {word_count_int} words, acceptable range: {int(word_count_int * 0.9)}-{int(word_count_int * 1.1)} words)."
+    
+    formatting_guidelines = get_formatting_guidelines(article_type)
     
     system_instruction = f"""ROLE & OBJECTIVE:
-You are a Senior Technical Evangelist and Engineering Editor. Your goal is to ingest multiple raw transcripts (attached by the user), filter out conversational noise, synthesize the technical concepts, and produce a high-impact, "viral-style" LinkedIn article. It should be informative, and provide core concepts to people. {size_guidance.get(output_size, size_guidance['MEDIUM'])}
+You are a Senior Technical Evangelist and Engineering Editor. Your goal is to ingest multiple raw transcripts (attached by the user), filter out conversational noise, synthesize the technical concepts, and produce a high-impact {article_type.lower()}. It should be informative, and provide core concepts to people. {size_guidance}
 
 YOUR DATA SOURCE:
 The user will attach multiple files (transcripts/notes). These contain the source of truth.
@@ -112,48 +206,38 @@ CONTENT GUIDELINES:
 Fairness is Key: When comparing technologies (e.g., Ray vs. Triton), you must be objective. Highlight where Tool A shines and where Tool B is better. Avoid marketing hype; focus on engineering reality.
 Depth: The content must be useful to a technical practitioner. Do not stay on the surface.
 
-OUTPUT FORMATTING (STRICT LINKEDIN STYLE):
-The Hook: Start with a punchy, 1-2 sentence hook. No "In this post" or "Today we discuss." Jump straight into the tension or the value proposition.
-Structure:
-Use short paragraphs (1-2 sentences max).
-Use double line breaks for "white space" readability.
-Use bullet points for technical comparisons or feature lists.
-Tone: Professional, insightful, slightly conversational but highly technical.
-Emojis: Use them to break up text, but do not overdo it. (e.g., 🚀 🛠️ 💡).
-Engagement: End with a specific question to the audience to drive comments.
-Hashtags: 3-5 relevant tags at the very bottom.
+{formatting_guidelines}
 
 IMPORTANT OUTPUT REQUIREMENTS:
-1. The article title should be on the first line, prefixed with "TITLE: "
-2. The article content should follow after a blank line
-3. At the end, include a line with "HASHTAGS: " followed by 3-5 relevant hashtags separated by spaces
+1. DO NOT include a title in your response - only provide the article content
+2. At the end, include a line with "HASHTAGS: " followed by 3-5 relevant hashtags separated by spaces (only if the article type supports hashtags)
 
 INTERACTION MODEL:
-The user will provide the files and a specific "Context Block" containing the Topic, Angle, and Audience. You will wait for this input, analyze the attached files based on those variables, and generate the post."""
+The user will provide the files and a specific "Context Block" containing the Topic, Angle, and Audience. You will wait for this input, analyze the attached files based on those variables, and generate the {article_type.lower()}."""
     
-    user_prompt = f"""{context_block}
+    user_prompt = f"""{context_block}{additional_block}
 
-Please analyze the following transcripts and generate a LinkedIn article based on the guidelines above:
+Please analyze the following transcripts and generate a {article_type} based on the guidelines above:
 
 {transcript_content}
 
 Remember to:
-1. Start your response with "TITLE: " followed by the article title
-2. Include the full article content
-3. End with "HASHTAGS: " followed by 3-5 relevant hashtags"""
+1. Include the full {article_type.lower()} content (NO TITLE - title will be generated separately)
+2. DO NOT include a references section - that will be generated separately
+3. End with "HASHTAGS: " followed by 3-5 relevant hashtags (only if hashtags are appropriate for this article type)"""
     
     return system_instruction, user_prompt
 
 
-def generate_article(transcripts, context_message, output_size, enable_research):
-    """Generate article using Gemini API."""
+def generate_article(transcripts, context_message, additional_info, article_type, word_count, audience, enable_research):
+    """Generate article using Gemini API (without title and without references)."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is not set")
     
     client = genai.Client(api_key=api_key)
     
-    system_instruction, user_prompt = build_prompt(transcripts, context_message, output_size, enable_research)
+    system_instruction, user_prompt = build_prompt(transcripts, context_message, additional_info, article_type, word_count, audience, enable_research)
     
     # Using gemini-3-pro-preview as per user's example
     # If this model is not available, try: "gemini-1.5-pro" or "gemini-2.0-flash-exp"
@@ -204,18 +288,222 @@ def generate_article(transcripts, context_message, output_size, enable_research)
     return full_response
 
 
+def generate_title(article_content, article_type, audience, context_message):
+    """Generate title for the article using a separate, simpler AI call."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable is not set")
+    
+    client = genai.Client(api_key=api_key)
+    
+    # Build context for title generation
+    context_info = ""
+    if context_message and context_message.strip():
+        context_info = f"\nContext/Topic: {context_message}"
+    
+    system_instruction = f"""You are an expert at creating compelling, attention-grabbing titles for {article_type.lower()}s.
+
+Your task is to generate a single, engaging title based on the article content provided.
+
+Guidelines:
+- The title should be concise (ideally 6-12 words, maximum 15 words)
+- It should capture the main value proposition or key insight
+- It should be optimized for the target audience: {audience}
+- Make it compelling and click-worthy while remaining accurate
+- Do not use quotes, colons, or special formatting unless necessary
+- Return ONLY the title, nothing else"""
+
+    user_prompt = f"""Based on the following {article_type.lower()} content, generate a compelling title.{context_info}
+
+Target Audience: {audience}
+
+Article Content:
+{article_content}
+
+Generate a single, compelling title (6-12 words, max 15 words):"""
+    
+    # Use a simpler model for title generation - no thinking, no research tools
+    model = "gemini-2.0-flash-exp"  # Faster model for simple tasks
+    
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=user_prompt),
+            ],
+        ),
+    ]
+    
+    generate_content_config = types.GenerateContentConfig(
+        # No thinking config - just normal LLM call
+        # No tools - no Google Search
+        system_instruction=[
+            types.Part.from_text(text=system_instruction),
+        ],
+        max_output_tokens=50,  # Limit length - titles should be short
+    )
+    
+    print("\n📝 Generating title...\n")
+    
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=generate_content_config,
+    )
+    
+    title = response.text.strip()
+    
+    # Clean up the title - remove quotes if present
+    title = title.strip('"\'')
+    
+    print(f"✓ Title generated: {title}\n")
+    
+    return title
+
+
+def generate_references(article_content, title, additional_info, article_type, audience):
+    """Generate references section with verified links."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable is not set")
+    
+    client = genai.Client(api_key=api_key)
+    
+    # Extract links from additional_info
+    provided_links = []
+    if additional_info and additional_info.strip():
+        provided_links = extract_links(additional_info)
+    
+    # Verify provided links
+    verified_links = []
+    if provided_links:
+        print("\n🔍 Verifying provided links...")
+        for link in provided_links:
+            if verify_link(link):
+                verified_links.append(link)
+                print(f"  ✓ Verified: {link}")
+            else:
+                print(f"  ✗ Failed to verify: {link}")
+    
+    # Build context for references
+    links_context = ""
+    if verified_links:
+        links_context = f"\n\nIMPORTANT: The following verified links were provided and should be prioritized in the references:\n" + "\n".join(f"- {link}" for link in verified_links)
+    
+    system_instruction = f"""You are an expert at creating reference sections for {article_type.lower()}s.
+
+Your task is to generate a references section with 2-5 high-quality references based on the article content.
+
+Guidelines:
+- Generate 2-5 references (aim for 3-4 ideally)
+- All links MUST be verified and accessible
+- Include a mix of documentation, articles, research papers, or official resources
+- Prioritize any verified links provided by the user
+- Each reference should include: title/description and URL
+- Format: [Title/Description](URL)
+- Ensure all URLs are valid and accessible
+- Target audience: {audience}
+- Return ONLY the references section in markdown format, nothing else"""
+
+    user_prompt = f"""Based on the following {article_type.lower()} content, generate a references section with 2-5 verified links.
+
+Article Title: {title}
+Target Audience: {audience}{links_context}
+
+Article Content:
+{article_content}
+
+Generate a references section with 2-5 verified, accessible links. Format as markdown links: [Title](URL)"""
+    
+    # Use a simpler model for references generation - but allow URL context tool for verification
+    model = "gemini-2.0-flash-exp"
+    
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=user_prompt),
+            ],
+        ),
+    ]
+    
+    # Use URL context tool to verify links
+    generate_content_config = types.GenerateContentConfig(
+        # No thinking config - just normal LLM call
+        tools=[
+            types.Tool(url_context=types.UrlContext()),  # Allow URL context for link verification
+        ],
+        system_instruction=[
+            types.Part.from_text(text=system_instruction),
+        ],
+        max_output_tokens=500,  # Limit length for references section
+    )
+    
+    print("\n📚 Generating references section...\n")
+    
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=generate_content_config,
+    )
+    
+    references_text = response.text.strip()
+    
+    # Extract all links from the references and verify them
+    references_links = extract_links(references_text)
+    print(f"\n🔍 Verifying {len(references_links)} reference links...")
+    
+    verified_references = []
+    invalid_links = []
+    
+    for link in references_links:
+        if verify_link(link):
+            verified_references.append(link)
+            print(f"  ✓ Verified: {link}")
+        else:
+            invalid_links.append(link)
+            print(f"  ✗ Invalid link: {link}")
+    
+    if invalid_links:
+        print(f"\n⚠️  Warning: {len(invalid_links)} invalid link(s) found. Regenerating references...")
+        # Regenerate if there are invalid links
+        user_prompt_retry = f"""The previous response contained invalid links. Please regenerate the references section with ONLY verified, accessible links.
+
+Article Title: {title}
+Target Audience: {audience}{links_context}
+
+Article Content:
+{article_content}
+
+Generate a references section with 2-5 verified, accessible links. Format as markdown links: [Title](URL)
+IMPORTANT: Only include links that you can verify are accessible."""
+        
+        contents_retry = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=user_prompt_retry),
+                ],
+            ),
+        ]
+        
+        response_retry = client.models.generate_content(
+            model=model,
+            contents=contents_retry,
+            config=generate_content_config,
+        )
+        
+        references_text = response_retry.text.strip()
+    
+    print(f"\n✓ References section generated\n")
+    
+    return references_text
+
+
 def parse_article_response(response):
-    """Parse the response to extract title, content, and hashtags."""
-    title = None
+    """Parse the response to extract content and hashtags (title is generated separately)."""
     content = response
     hashtags = []
-    
-    # Extract title
-    title_match = re.search(r'^TITLE:\s*(.+?)$', response, re.MULTILINE)
-    if title_match:
-        title = title_match.group(1).strip()
-        # Remove title line from content
-        content = re.sub(r'^TITLE:\s*.+?$', '', content, flags=re.MULTILINE).strip()
     
     # Extract hashtags
     hashtags_match = re.search(r'HASHTAGS:\s*(.+?)$', response, re.MULTILINE | re.DOTALL)
@@ -225,11 +513,7 @@ def parse_article_response(response):
         # Remove hashtags line from content
         content = re.sub(r'HASHTAGS:\s*.+?$', '', content, flags=re.MULTILINE | re.DOTALL).strip()
     
-    # If no title found, generate a default one
-    if not title:
-        title = f"Article_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    return title, content, hashtags
+    return content, hashtags
 
 
 def sanitize_filename(title):
@@ -245,7 +529,7 @@ def sanitize_filename(title):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate LinkedIn article from YouTube transcripts')
+    parser = argparse.ArgumentParser(description='Generate article/post from YouTube transcripts')
     parser.add_argument('--url-1', required=True, help='YouTube URL 1')
     parser.add_argument('--url-2', default='', help='YouTube URL 2 (optional)')
     parser.add_argument('--url-3', default='', help='YouTube URL 3 (optional)')
@@ -257,8 +541,15 @@ def main():
     parser.add_argument('--url-9', default='', help='YouTube URL 9 (optional)')
     parser.add_argument('--url-10', default='', help='YouTube URL 10 (optional)')
     parser.add_argument('--context', default='', help='Context message about the article (optional)')
-    parser.add_argument('--output-size', default='MEDIUM', choices=['SHORT', 'MEDIUM', 'LONG'], 
-                       help='Output size (default: MEDIUM)')
+    parser.add_argument('--additional-info', default='', help='Additional information about the subject (can include links) (optional)')
+    parser.add_argument('--article-type', default='LinkedIn Article', 
+                       choices=['LinkedIn Article', 'LinkedIn Post', 'Substack', 'Reddit Post', 'Blog Post', 'Twitter Thread'],
+                       help='Type of article/post to generate (default: LinkedIn Article)')
+    parser.add_argument('--word-count', default='1000', 
+                       choices=['500', '1000', '1500', '2000', '2500', '3000'],
+                       help='Target word count (default: 1000)')
+    parser.add_argument('--audience', default='Senior engineers and technical practitioners',
+                       help='Target audience (default: Senior engineers and technical practitioners)')
     parser.add_argument('--enable-research', type=lambda x: x.lower() == 'true', default=True,
                        help='Enable additional research (default: true)')
     parser.add_argument('--delay', type=int, default=15, help='Delay between transcript downloads in seconds (default: 15)')
@@ -297,20 +588,41 @@ def main():
     
     print(f"\n✓ Successfully downloaded {len(transcripts)} transcript(s)\n")
     
-    # Generate article
+    # Generate article (without title and without references)
     try:
-        response = generate_article(
+        article_response = generate_article(
             transcripts,
             args.context,
-            args.output_size,
+            args.additional_info,
+            args.article_type,
+            args.word_count,
+            args.audience,
             args.enable_research
         )
     except Exception as e:
         print(f"Error generating article: {e}", file=sys.stderr)
         sys.exit(1)
     
-    # Parse response
-    title, content, hashtags = parse_article_response(response)
+    # Parse article response
+    content, hashtags = parse_article_response(article_response)
+    
+    # Generate title separately
+    try:
+        title = generate_title(content, args.article_type, args.audience, args.context)
+    except Exception as e:
+        print(f"Error generating title: {e}", file=sys.stderr)
+        # Fallback to default title if title generation fails
+        title = f"{args.article_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        print(f"Using fallback title: {title}")
+    
+    # Generate references separately
+    try:
+        references = generate_references(content, title, args.additional_info, args.article_type, args.audience)
+    except Exception as e:
+        print(f"Error generating references: {e}", file=sys.stderr)
+        # Fallback to empty references if generation fails
+        references = "\n\n## References\n\n*References could not be generated.*"
+        print(f"Using fallback references section")
     
     # Create articles directory
     articles_dir = Path("articles")
@@ -320,9 +632,10 @@ def main():
     filename = sanitize_filename(title)
     filepath = articles_dir / f"{filename}.md"
     
-    # Format the article with title and hashtags
+    # Format the article with title, content, references, and hashtags
     article_content = f"# {title}\n\n"
     article_content += content
+    article_content += f"\n\n---\n\n## References\n\n{references}"
     if hashtags:
         article_content += f"\n\n---\n\n**Hashtags:** {' '.join(hashtags)}\n"
     
@@ -331,6 +644,7 @@ def main():
     
     print(f"\n✓ Article saved to: {filepath}")
     print(f"  Title: {title}")
+    print(f"  References: {len(extract_links(references))} link(s)")
     print(f"  Hashtags: {', '.join(hashtags) if hashtags else 'None'}")
 
 

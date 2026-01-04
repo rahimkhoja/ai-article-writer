@@ -47,15 +47,47 @@ on:
         description: 'Context/Message about what the article should be about (optional)'
         required: false
         type: string
-      output_size:
-        description: 'Output size (SHORT, MEDIUM, LONG)'
+      additional_info:
+        description: 'Additional information about the subject (can include links for AI to review) (optional)'
+        required: false
+        type: string
+      article_type:
+        description: 'Type of article/post to generate'
         required: false
         type: choice
         options:
-          - SHORT
-          - MEDIUM
-          - LONG
-        default: MEDIUM
+          - LinkedIn Article
+          - LinkedIn Post
+          - Substack
+          - Reddit Post
+          - Blog Post
+          - Twitter Thread
+        default: LinkedIn Article
+      word_count:
+        description: 'Target word count'
+        required: false
+        type: choice
+        options:
+          - '500'
+          - '1000'
+          - '1500'
+          - '2000'
+          - '2500'
+          - '3000'
+        default: '1000'
+      audience:
+        description: 'Target audience'
+        required: false
+        type: choice
+        options:
+          - Senior engineers and technical practitioners
+          - Software developers and engineers
+          - Product managers and business leaders
+          - Data scientists and ML engineers
+          - DevOps and infrastructure engineers
+          - General tech audience
+          - Students and beginners
+        default: Senior engineers and technical practitioners
       enable_research:
         description: 'Enable additional research via Google Search'
         required: false
@@ -140,7 +172,10 @@ jobs:
             --url-9 "${{ inputs.youtube_url_9 }}" \
             --url-10 "${{ inputs.youtube_url_10 }}" \
             --context "${{ inputs.context_message }}" \
-            --output-size "${{ inputs.output_size }}" \
+            --additional-info "${{ inputs.additional_info }}" \
+            --article-type "${{ inputs.article_type }}" \
+            --word-count "${{ inputs.word_count }}" \
+            --audience "${{ inputs.audience }}" \
             --enable-research "${{ inputs.enable_research }}"
 
       - name: 📤 Commit and Push Article

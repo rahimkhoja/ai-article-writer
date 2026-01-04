@@ -64,7 +64,7 @@ on:
 
 jobs:
   generate:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     
     steps:
       - name: 📥 Checkout repository
@@ -72,20 +72,42 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: 🐍 Set up Python and venv
+        run: |
+          # Detect available Python version (try python3.11, python3.10, python3, python)
+          if command -v python3.11 &> /dev/null; then
+            PYTHON_CMD=python3.11
+          elif command -v python3.10 &> /dev/null; then
+            PYTHON_CMD=python3.10
+          elif command -v python3 &> /dev/null; then
+            PYTHON_CMD=python3
+          elif command -v python &> /dev/null; then
+            PYTHON_CMD=python
+          else
+            echo "Error: No Python installation found"
+            exit 1
+          fi
+          
+          echo "Using Python: $($PYTHON_CMD --version)"
+          echo "PYTHON_CMD=$PYTHON_CMD" >> $GITHUB_ENV
+          
+          # Create virtual environment
+          $PYTHON_CMD -m venv venv
+          
+          # Activate venv and upgrade pip
+          source venv/bin/activate
+          python -m pip install --upgrade pip
 
       - name: 📦 Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          source venv/bin/activate
           pip install -r requirements.txt
 
       - name: 📝 Generate article from transcripts
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          source venv/bin/activate
           python scripts/generate_article.py \
             --url-1 "${{ inputs.youtube_url_1 }}" \
             --url-2 "${{ inputs.youtube_url_2 }}" \
